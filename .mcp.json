@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "codex-prompts": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/node_modules/claude-prompts/dist/index.js",
+        "--transport=stdio"
+      ],
+      "env": {
+        "MCP_WORKSPACE": "${CLAUDE_PLUGIN_ROOT}",
+        "MCP_RESOURCES_PATH": "${CLAUDE_PLUGIN_ROOT}/node_modules/claude-prompts/resources"
+      }
+    }
+  }
+}
