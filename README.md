@@ -1,6 +1,6 @@
 # codex-prompts
 
-Codex CLI plugin for the [claude-prompts](https://github.com/minipuft/claude-prompts) MCP server: symbolic `>>` prompt commands, chain execution, quality gates, and autonomous verification (Ralph) loops, delivered through Codex lifecycle hooks.
+Codex CLI plugin for the [claude-prompts](https://github.com/minipuft/claude-prompts-mcp) MCP server: symbolic `>>` prompt commands, chain execution, quality gates, and autonomous verification (Ralph) loops, delivered through Codex lifecycle hooks.
 
 This is the Codex CLI sibling of [gemini-prompts](https://github.com/minipuft/gemini-prompts) (Gemini CLI) and [opencode-prompts](https://github.com/minipuft/opencode-prompts) (OpenCode). The Python hook core is shared: `hooks/lib` is a symlink into the `claude-prompts` npm package, and each hook script here is a thin adapter over that shared library.
 
@@ -45,7 +45,7 @@ cat > ~/.codex/dev-marketplace/.claude-plugin/marketplace.json <<'EOF'
   "name": "codex-prompts-dev",
   "owner": { "name": "dev" },
   "plugins": [
-    { "name": "codex-prompts", "description": "Dev build", "version": "0.1.0", "source": "./plugins/codex-prompts" }
+    { "name": "codex-prompts", "description": "Dev build", "version": "0.1.3", "source": "./plugins/codex-prompts" }
   ]
 }
 EOF
@@ -54,6 +54,27 @@ codex plugin add codex-prompts@codex-prompts-dev
 ```
 
 Marketplace source paths must be marketplace-relative — an absolute `path` in the manifest is not resolved (measured on 0.146). Re-run `codex plugin add` after changing hook files; installs are cached copies, not live views.
+
+## Prompt catalog configuration
+
+The portable plugin default is the curated 26-prompt catalog bundled with its `claude-prompts` dependency. Mutable MCP state and logs are stored separately under the OS temporary directory (`/tmp/codex-prompts/server` on Linux).
+
+To opt this user into a persistent catalog from another checkout, create `~/.config/codex-prompts/config.json` (`$XDG_CONFIG_HOME/codex-prompts/config.json` when `XDG_CONFIG_HOME` is set):
+
+```json
+{
+  "resourcesPath": "/absolute/path/to/claude-prompts-mcp/server/resources"
+}
+```
+
+Resource selection precedence is:
+
+1. `MCP_RESOURCES_PATH`
+2. The file named by `CODEX_PROMPTS_CONFIG_PATH`
+3. The default user config above
+4. The 26-prompt catalog bundled with the plugin
+
+Configured paths must be absolute existing directories. Invalid explicit configuration fails startup with a path-specific error instead of silently changing the visible prompt inventory. This setting is user-global across Codex projects; Codex 0.146 does not expose reliable invoking-project context to plugin MCP children.
 
 ## Trust the hooks (required once)
 
@@ -77,11 +98,9 @@ Tool names above are Codex-verified: Codex emits Claude Code-compatible `tool_na
 ## Known divergences on codex-cli 0.146 (measured 2026-08-03)
 
 - **`subagent-gate-enforce` is not ported.** Codex fires `SubagentStop` with the full Claude-compatible envelope (`agent_transcript_path`, `agent_type`, `stop_hook_active`), but the delegated task prompt is encrypted in `tool_input.message` and the transcript's inter-agent `NEW_TASK` payload block is empty — the `### Quality Gates` criteria the upstream hook parses are not recoverable in plaintext anywhere. Until Codex persists inter-agent payloads (or a session-state-based redesign is validated), delegated-step gate enforcement relies on the main-session `gate-enforce` + `ralph-stop` loop.
-- **Plugin `.mcp.json` paths are not interpolated.** Codex registers the bundled server (`codex mcp list` shows it) but spawns it with the literal string `${CLAUDE_PLUGIN_ROOT}` in argv and env, an empty `CLAUDE_PLUGIN_ROOT` environment, and the *session* directory as cwd — plugin-relative paths cannot work. The bundled `.mcp.json` stays in place as the forward contract — it activates unchanged once Codex interpolates plugin variables.
-- **MCP servers run inside a fixed Codex sandbox.** Measured on 0.146: an MCP server child may write the session workdir and `/tmp`, but not `~/.codex` (including the plugin cache), and `sandbox_workspace_write.writable_roots` additions are honored by the shell sandbox yet NOT by MCP children. `--dangerously-bypass-approvals-and-sandbox` lifts the restriction.
-- **The packaged server currently writes state and logs package-relative** (`node_modules/claude-prompts/runtime-state/` + `logs/`), ignoring `MCP_WORKSPACE` — an upstream defect surfaced by this port's isolation testing. Every `prompt_engine` call performs such a write, so under the default sandbox the call fails even though startup and tool listing succeed.
-
-  **Practical consequence** until the upstream `MCP_WORKSPACE` fix ships: a globally-registered server (`codex mcp add codex-prompts -- node <abs path>/node_modules/claude-prompts/dist/index.js --transport=stdio --client=codex`) works when the package directory is writable by the session — i.e. when your Codex session runs in the directory tree containing the server install, or when the sandbox is bypassed for automation. Verified end-to-end in isolation (global servers disabled): hooks + directive injection + `prompt_engine` round-trip all green under `--dangerously-bypass-approvals-and-sandbox`.
+- **Plugin variables are not interpolated.** Codex 0.146 passed `${CLAUDE_PLUGIN_ROOT}` literally. The plugin therefore launches a relative `./bin/start-mcp.mjs` with `cwd: "."`, which Codex resolves to the installed plugin root.
+- **MCP servers run inside a fixed Codex sandbox.** A child may write `/tmp` but not `~/.codex` or the plugin cache. The launcher sets `MCP_RUNTIME_ROOT` to the OS-temp runtime directory, while prompt resources are selected independently through the persistent user configuration described above.
+- **Project context is unavailable to the MCP child.** Codex strips the invoking project path from this launch shape, so automatic per-project catalogs are not supported on 0.146. Use the explicit user config or `MCP_RESOURCES_PATH`.
 
 ## Development notes
 
