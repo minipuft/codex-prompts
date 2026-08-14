@@ -3,16 +3,24 @@
 
 Not a plain shim: Codex natively enumerates every skill under ~/.codex/skills
 in its <skills_instructions> injection (measured 16.4KB on codex-cli 0.146,
-2026-08-03), so the upstream hook's categorized catalog would duplicate what
-the host already provides. This adapter reuses upstream scan_skills() as the
-existence gate and injects only the protocol framing Codex lacks.
+2026-08-03), so a categorized catalog would duplicate what the host already
+provides. This adapter uses the skill count as an existence gate and injects
+only the protocol framing Codex lacks.
+
+Counting is local (`_skill_catalog`), not `load_upstream_hook("session-skills.py")`.
+That upstream file was a hook in name only — registered in no `hooks.json` on either
+side — and was removed on 2026-08-05 once the Claude Code copy moved to the global
+hooks layer. Importing it would then raise, the hook would exit non-zero, and Codex
+reads a failed hook launch as a BLOCK on that event. This adapter only ever used the
+count, so it now owns the ~30 lines that produce one (verified identical: 108 of 109
+directories) instead of depending on a 253-line categorizer it never read.
 """
 
 import json
 import sys
 from pathlib import Path
 
-from _codex_bootstrap import load_upstream_hook
+from _skill_catalog import count_skills
 
 
 def main() -> None:
@@ -26,12 +34,10 @@ def main() -> None:
     if hook_input.get("source") not in ("startup", "resume"):
         sys.exit(0)
 
-    upstream = load_upstream_hook("session-skills.py")
-    categories = upstream.scan_skills(Path.home() / ".codex" / "skills")
-    if not categories:
+    total = count_skills(Path.home() / ".codex" / "skills")
+    if not total:
         sys.exit(0)
 
-    total = sum(len(names) for names in categories.values())
     context = "\n".join(
         [
             f"Skills-first: {total} skills are listed in your skills instructions — "

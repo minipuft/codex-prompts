@@ -67,6 +67,40 @@ def stdout_json(result):
     return json.loads(result.stdout) if result.stdout.strip() else {}
 
 
+def resolve_resources_path(env: dict, home: Path, bundled_resources: Path):
+    """Execute the Node resolver with explicit inputs and capture its contract."""
+    script = """
+import { resolveResourcesPath } from './bin/resource-config.mjs';
+
+try {
+  const resolved = resolveResourcesPath({
+    env: JSON.parse(process.argv[1]),
+    homeDirectory: process.argv[2],
+    bundledResourcesPath: process.argv[3],
+  });
+  process.stdout.write(resolved);
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(2);
+}
+"""
+    return subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "--eval",
+            script,
+            json.dumps(env),
+            str(home),
+            str(bundled_resources),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        timeout=30,
+    )
+
+
 class TestPromptSuggest:
     def test_non_command_prompt_passes_through(self, workspace):
         result = run_adapter(
@@ -332,3 +366,107 @@ class TestCacheLayoutFallback:
         }
         result = run_adapter("prompt-suggest.py", payload, workspace, hooks_dir=cache_hooks)
         assert result.returncode == 0
+
+
+class TestMcpManifest:
+    """Contract tests for the plugin-managed MCP launch definition."""
+
+    def test_launches_bundled_server_from_plugin_root(self):
+        manifest = json.loads((REPO_ROOT / ".mcp.json").read_text())
+        server = manifest["mcpServers"]["codex-prompts"]
+
+        assert server["command"] == "node"
+        assert server["cwd"] == "."
+        assert server["default_tools_approval_mode"] == "approve"
+        assert server["args"] == [
+            "./bin/start-mcp.mjs",
+            "--transport=stdio",
+            "--client=codex",
+        ]
+        assert (REPO_ROOT / server["args"][0]).is_file()
+        assert "${CLAUDE_PLUGIN_ROOT}" not in json.dumps(server)
+
+    def test_launcher_uses_os_temp_runtime_workspace(self):
+        launcher = (REPO_ROOT / "bin" / "start-mcp.mjs").read_text()
+        assert "tmpdir()" in launcher
+        assert "MCP_RUNTIME_ROOT" in launcher
+
+    def test_launcher_configures_resources_before_importing_server(self):
+        launcher = (REPO_ROOT / "bin" / "start-mcp.mjs").read_text()
+        configure_index = launcher.index("configureResourcesEnvironment")
+        import_index = launcher.index("await import(")
+
+        assert configure_index < import_index
+
+
+class TestResourceConfig:
+    """Behavioral tests for persistent resource selection precedence."""
+
+    def test_missing_user_config_uses_bundled_resources(self, tmp_path):
+        bundled = tmp_path / "bundled"
+        bundled.mkdir()
+
+        result = resolve_resources_path({}, tmp_path / "home", bundled)
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == str(bundled)
+
+    def test_default_user_config_selects_persistent_resources(self, tmp_path):
+        resources = tmp_path / "source-resources"
+        resources.mkdir()
+        config = tmp_path / "home" / ".config" / "codex-prompts" / "config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps({"resourcesPath": str(resources)}))
+
+        result = resolve_resources_path({}, tmp_path / "home", tmp_path / "bundled")
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == str(resources)
+
+    def test_explicit_mcp_resources_path_wins_over_user_config(self, tmp_path):
+        explicit = tmp_path / "explicit-resources"
+        configured = tmp_path / "configured-resources"
+        explicit.mkdir()
+        configured.mkdir()
+        config = tmp_path / "config.json"
+        config.write_text(json.dumps({"resourcesPath": str(configured)}))
+        env = {
+            "MCP_RESOURCES_PATH": str(explicit),
+            "CODEX_PROMPTS_CONFIG_PATH": str(config),
+        }
+
+        result = resolve_resources_path(env, tmp_path / "home", tmp_path / "bundled")
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == str(explicit)
+
+    def test_explicit_config_path_must_exist(self, tmp_path):
+        env = {"CODEX_PROMPTS_CONFIG_PATH": str(tmp_path / "missing.json")}
+
+        result = resolve_resources_path(env, tmp_path / "home", tmp_path / "bundled")
+
+        assert result.returncode == 2
+        assert "does not exist" in result.stderr
+
+    def test_malformed_config_fails_clearly(self, tmp_path):
+        config = tmp_path / "config.json"
+        config.write_text("{not-json")
+        env = {"CODEX_PROMPTS_CONFIG_PATH": str(config)}
+
+        result = resolve_resources_path(env, tmp_path / "home", tmp_path / "bundled")
+
+        assert result.returncode == 2
+        assert "valid JSON" in result.stderr
+
+    @pytest.mark.parametrize("configured_path", ["relative/resources", "/does/not/exist"])
+    def test_configured_resource_path_must_be_absolute_existing_directory(
+        self, tmp_path, configured_path
+    ):
+        config = tmp_path / "config.json"
+        config.write_text(json.dumps({"resourcesPath": configured_path}))
+        env = {"CODEX_PROMPTS_CONFIG_PATH": str(config)}
+
+        result = resolve_resources_path(env, tmp_path / "home", tmp_path / "bundled")
+
+        assert result.returncode == 2
+        assert "resourcesPath" in result.stderr

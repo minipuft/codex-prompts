@@ -3,13 +3,12 @@
     "codex-prompts": {
       "command": "node",
       "args": [
-        "${CLAUDE_PLUGIN_ROOT}/node_modules/claude-prompts/dist/index.js",
-        "--transport=stdio"
+        "./bin/start-mcp.mjs",
+        "--transport=stdio",
+        "--client=codex"
       ],
-      "env": {
-        "MCP_WORKSPACE": "${CLAUDE_PLUGIN_ROOT}",
-        "MCP_RESOURCES_PATH": "${CLAUDE_PLUGIN_ROOT}/node_modules/claude-prompts/resources"
-      }
+      "cwd": ".",
+      "default_tools_approval_mode": "approve"
     }
   }
 }

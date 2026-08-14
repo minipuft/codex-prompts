@@ -7,8 +7,8 @@ Resolves the shared claude-prompts hook library in both install layouts:
 - codex plugin cache: the cache copy drops symlinks (measured 2026-08-03 on
   codex-cli 0.146), so fall back to node_modules/claude-prompts/hooks/lib.
 
-Pins MCP_WORKSPACE to the plugin root before any lib import so hook state and
-the bundled MCP server agree on runtime-state paths, and defaults Ralph's
+Pins MCP_WORKSPACE to an OS-temp workspace before any lib import so hook state and
+the sandboxed bundled MCP server agree on runtime-state paths, and defaults Ralph's
 spawned-work client to codex (consumed by cli_spawner.SpawnConfig).
 """
 
@@ -17,6 +17,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 _HOOKS_DIR = Path(__file__).resolve().parent
@@ -38,7 +39,7 @@ def _resolve_lib_dir() -> Path:
 LIB_DIR = _resolve_lib_dir()
 UPSTREAM_HOOKS_DIR = LIB_DIR.parent
 
-os.environ.setdefault("MCP_WORKSPACE", str(_PLUGIN_ROOT))
+os.environ.setdefault("MCP_WORKSPACE", str(Path(tempfile.gettempdir()) / "codex-prompts"))
 os.environ.setdefault("RALPH_SPAWN_CLIENT", "codex")
 if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
