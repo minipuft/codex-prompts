@@ -1,0 +1,50 @@
+name: CI
+
+# The adapter suite existed for months with nothing running it. Codex treats a hook
+# that cannot launch as a BLOCK on the event, so a broken adapter is not a degraded
+# plugin — it is a stalled session. This is also the workflow `downstream-contract.json`
+# names as `localValidationWorkflow`, so the consumer contract points at a job that
+# actually validates rather than at the publish pipeline.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      # Frozen install: the adapters resolve `hooks/lib` through the symlink into
+      # node_modules, so the suite cannot run before the dependency is present.
+      - name: Install the upstream runtime
+        run: npm ci --ignore-scripts
+
+      - name: Prove hooks/lib resolves
+        run: |
+          set -euo pipefail
+          test -d hooks/lib || { echo "ERROR: hooks/lib does not resolve"; exit 1; }
+          test -f node_modules/claude-prompts/dist/index.js \
+            || { echo "ERROR: upstream runtime entry is missing"; exit 1; }
+
+      - name: Install test dependencies
+        run: python3 -m pip install --disable-pip-version-check pytest
+
+      - name: Run the adapter suite
+        run: python3 -m pytest tests/ -q
