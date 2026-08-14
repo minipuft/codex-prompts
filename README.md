@@ -29,9 +29,13 @@ codex plugin marketplace add https://github.com/minipuft/minipuft-plugins.git
 codex plugin add codex-prompts@minipuft
 ```
 
+The listing points at this repository's **`dist` branch**, not `main`, and that distinction is the difference between a working plugin and a dead one. Codex installs a plugin by *copying* its source: it runs no `npm install` and it drops symlinks. A copy of `main` therefore arrives with no `node_modules`, so the MCP server dies with `ERR_MODULE_NOT_FOUND` and `hooks/lib` — a symlink into `node_modules` on `main` — resolves to nothing. Codex reads a hook that cannot launch as a **block on that event**, so that state is worse than an obvious failure.
+
+`dist` is published by [`publish-dist.yml`](.github/workflows/publish-dist.yml) with the runtime already materialized: the tracked sources, the resolved `claude-prompts` package, and `hooks/lib` as real files. The workflow drives the server through an `initialize` handshake and runs a hook before it publishes, so a tree that cannot start is never pushed.
+
 ### From a local checkout (development)
 
-codex-cli 0.146 has no path-based install — every install is marketplace-mediated, so a local checkout is served through a tiny local marketplace:
+codex-cli 0.146 has no path-based install — every install is marketplace-mediated, so a local checkout is served through a tiny local marketplace. Run `npm install` first: a checkout is the one install shape that *does* need it, and it is why a developer's machine can make a broken published plugin look healthy.
 
 ```bash
 git clone https://github.com/minipuft/codex-prompts.git

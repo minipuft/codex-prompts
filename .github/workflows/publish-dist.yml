@@ -1,0 +1,145 @@
+name: Publish dist branch
+
+# Codex installs a plugin by COPYING its source. It runs no install step and it drops
+# symlinks. A clone of `main` therefore yields a plugin with no runtime at all: measured
+# 2026-08-14, the server dies with ERR_MODULE_NOT_FOUND on
+# node_modules/claude-prompts/dist/index.js, and `hooks/lib` — a symlink into node_modules
+# on `main` — resolves to nothing. Codex treats a hook that cannot launch as a BLOCK on the
+# event, so that state is worse than a visible failure.
+#
+# This workflow publishes a `dist` branch that is already materialized: the tracked sources
+# plus the resolved claude-prompts package plus hooks/lib as REAL FILES. The marketplace
+# points at `dist`, so `codex plugin add` copies something that works. Same mechanism
+# claude-prompts-mcp already uses to ship Claude Code, force-pushed per publish so the
+# ~10 MB replaces the previous tree instead of accumulating in history.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-dist
+  cancel-in-progress: false
+
+jobs:
+  publish-dist:
+    name: Publish dist branch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Resolve the runtime from the registry
+        run: npm ci --omit=dev --ignore-scripts
+
+      - name: Assemble the dist tree
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/dist-stage"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE/node_modules"
+
+          # Tracked sources only — never the working tree, so an untracked local file
+          # cannot leak into a published artifact.
+          git archive HEAD | tar -x -C "$STAGE"
+
+          # The resolved package, whole. Hand-picking dist/hooks/resources omits
+          # config.json, and the server validates its own package root against it:
+          # "Invalid package root ... Missing: config.json" (measured 2026-08-14).
+          cp -r node_modules/claude-prompts "$STAGE/node_modules/claude-prompts"
+
+          # hooks/lib ships as real files. On main it is a symlink into node_modules,
+          # which Codex drops when it copies the plugin.
+          rm -f "$STAGE/hooks/lib"
+          cp -r node_modules/claude-prompts/hooks/lib "$STAGE/hooks/lib"
+
+          # Source-only paths an installer never runs.
+          rm -rf "$STAGE/.github" "$STAGE/tests"
+
+          # The source .gitignore excludes node_modules/, and this tree exists to SHIP
+          # node_modules. Leaving it would make `git add -A` silently drop the entire
+          # runtime and publish exactly the broken plugin this workflow prevents.
+          rm -f "$STAGE/.gitignore"
+
+          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
+
+      - name: Verify the tree is complete
+        run: |
+          set -euo pipefail
+          cd "$STAGE"
+
+          for f in .mcp.json .codex-plugin/plugin.json hooks/hooks.json bin/start-mcp.mjs \
+                   node_modules/claude-prompts/dist/index.js \
+                   node_modules/claude-prompts/config.json; do
+            test -f "$f" || { echo "ERROR: dist tree is missing $f"; exit 1; }
+          done
+          test -d node_modules/claude-prompts/resources/prompts \
+            || { echo "ERROR: package root has no resources/prompts"; exit 1; }
+
+          # Real directory, not a symlink — this is the property Codex's copy destroys.
+          if [ -L hooks/lib ]; then echo "ERROR: hooks/lib is a symlink"; exit 1; fi
+          test -n "$(find hooks/lib -name '*.py' -print -quit)" \
+            || { echo "ERROR: hooks/lib carries no Python modules"; exit 1; }
+
+          for d in .github tests; do
+            [ -d "$d" ] && { echo "ERROR: dist tree includes source-only path $d"; exit 1; }
+          done
+          echo "dist tree: $(find . -type f | wc -l) files, $(du -sh . | cut -f1)"
+
+      # Path assertions prove files exist; they do not prove the plugin runs. Both halves
+      # of the install failed independently on main, so both are driven here.
+      - name: Drive the server the plugin declares
+        run: |
+          set -euo pipefail
+          cd "$STAGE"
+          REQ='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}'
+          RESPONSE=$(printf '%s\n' "$REQ" | timeout 120 node ./bin/start-mcp.mjs --transport=stdio --client=codex 2>/dev/null | head -c 2000 || true)
+          case "$RESPONSE" in
+            *'"protocolVersion"'*) echo "server completed an initialize handshake" ;;
+            *) echo "ERROR: server did not answer initialize. Got: ${RESPONSE:-<nothing>}"; exit 1 ;;
+          esac
+
+      - name: Drive a hook so hooks/lib resolution is proven
+        run: |
+          set -euo pipefail
+          cd "$STAGE"
+          PAYLOAD='{"session_id":"ci","cwd":"'"$STAGE"'","hook_event_name":"SessionStart","source":"startup","model":"ci","permission_mode":"default","transcript_path":"/dev/null"}'
+          if ! printf '%s\n' "$PAYLOAD" \
+              | CLAUDE_PLUGIN_ROOT="$STAGE" PLUGIN_ROOT="$STAGE" timeout 120 python3 hooks/session-skills.py > /dev/null; then
+            echo "ERROR: SessionStart adapter failed — Codex reads that as a BLOCK on the event"
+            exit 1
+          fi
+          echo "SessionStart adapter ran and resolved hooks/lib"
+
+      - name: Publish
+        run: |
+          set -euo pipefail
+          git checkout --orphan dist
+          git rm -rf . >/dev/null 2>&1 || true
+          git clean -fdx
+          cp -r "$STAGE"/. .
+          git add -A
+
+          # `git add` obeys ignore rules and prior index state, so "the file is on disk"
+          # and "the file will be published" are different claims. Assert the tracked one:
+          # this is precisely where a stray ignore rule would ship an empty runtime.
+          git ls-files --error-unmatch node_modules/claude-prompts/dist/index.js > /dev/null \
+            || { echo "ERROR: the runtime is on disk but not staged — check ignore rules"; exit 1; }
+          git ls-files node_modules/claude-prompts | head -1 > /dev/null
+
+          if git diff --cached --quiet; then
+            echo "No changes to publish."
+            exit 0
+          fi
+          VERSION=$(node -p "require('./.codex-plugin/plugin.json').version")
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "chore: publish dist ${VERSION}"
+          git push origin dist --force
