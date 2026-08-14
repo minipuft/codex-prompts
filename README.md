@@ -59,6 +59,8 @@ codex plugin add codex-prompts@codex-prompts-dev
 
 Marketplace source paths must be marketplace-relative — an absolute `path` in the manifest is not resolved (measured on 0.146). Re-run `codex plugin add` after changing hook files; installs are cached copies, not live views.
 
+> **Remove one before testing the other.** A dev install and the marketplace install carry the same plugin name, and Codex reports both as `installed, enabled` while registering only one MCP server. Measured 2026-08-14 on 0.147: with `codex-prompts@codex-prompts-dev` and `codex-prompts@minipuft` both enabled, `codex mcp list` showed a single `codex-prompts` server — the dev one, resolved by `cwd`. The published copy's server never registered and nothing reported the conflict. The winner is neither the newest nor the one added last, so a developer verifying the *published* plugin can be exercising their own checkout instead. Run `codex plugin remove codex-prompts@codex-prompts-dev` before installing from the marketplace, and vice versa.
+
 ## Prompt catalog configuration
 
 The portable plugin default is the curated 26-prompt catalog bundled with its `claude-prompts` dependency. Mutable MCP state and logs are stored separately under the OS temporary directory (`/tmp/codex-prompts/server` on Linux).
