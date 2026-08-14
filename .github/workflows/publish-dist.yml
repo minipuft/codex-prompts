@@ -130,9 +130,13 @@ jobs:
           # `git add` obeys ignore rules and prior index state, so "the file is on disk"
           # and "the file will be published" are different claims. Assert the tracked one:
           # this is precisely where a stray ignore rule would ship an empty runtime.
+          #
+          # One assertion, not two. A second `git ls-files … | head -1` sanity line sat here
+          # and killed the first run with exit 141: `head` closes the pipe, git takes SIGPIPE,
+          # and `set -o pipefail` turns that into a failed step. It checked nothing the line
+          # below does not already check.
           git ls-files --error-unmatch node_modules/claude-prompts/dist/index.js > /dev/null \
             || { echo "ERROR: the runtime is on disk but not staged — check ignore rules"; exit 1; }
-          git ls-files node_modules/claude-prompts | head -1 > /dev/null
 
           if git diff --cached --quiet; then
             echo "No changes to publish."
