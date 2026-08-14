@@ -12,6 +12,6 @@
     "node": ">=18.18.0"
   },
   "dependencies": {
-    "claude-prompts": "file:vendor/claude-prompts-3.1.2.tgz"
+    "claude-prompts": "^3.2.1"
   }
 }

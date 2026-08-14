@@ -1,5 +1,4 @@
 node_modules/
-vendor/*.tgz
 __pycache__/
 *.pyc
 .pytest_cache/
