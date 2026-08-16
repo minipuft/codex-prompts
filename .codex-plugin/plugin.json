@@ -1,0 +1,19 @@
+{
+  "name": "codex-prompts",
+  "version": "0.1.3",
+  "description": "Symbolic prompt commands (>>), chain execution, quality gates, and autonomous verification loops for Codex CLI, backed by the claude-prompts MCP server.",
+  "author": {
+    "name": "minipuft"
+  },
+  "repository": "https://github.com/minipuft/codex-prompts",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "prompts",
+    "chains",
+    "gates",
+    "hooks"
+  ],
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json"
+}
