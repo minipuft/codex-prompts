@@ -67,6 +67,36 @@ def stdout_json(result):
     return json.loads(result.stdout) if result.stdout.strip() else {}
 
 
+def configure_runtime_workspace(env: dict, tmp_directory: Path):
+    """Execute the Node workspace resolver with explicit inputs and capture its contract."""
+    script = """
+import { configureRuntimeWorkspace } from './bin/workspace-config.mjs';
+
+const env = JSON.parse(process.argv[1]);
+try {
+  const resolved = configureRuntimeWorkspace({ env, tmpDirectory: process.argv[2] });
+  process.stdout.write(JSON.stringify({ resolved, env }));
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(2);
+}
+"""
+    return subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "--eval",
+            script,
+            json.dumps(env),
+            str(tmp_directory),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        timeout=30,
+    )
+
+
 def resolve_resources_path(env: dict, home: Path, bundled_resources: Path):
     """Execute the Node resolver with explicit inputs and capture its contract."""
     script = """
@@ -386,10 +416,10 @@ class TestMcpManifest:
         assert (REPO_ROOT / server["args"][0]).is_file()
         assert "${CLAUDE_PLUGIN_ROOT}" not in json.dumps(server)
 
-    def test_launcher_uses_os_temp_runtime_workspace(self):
+    def test_launcher_delegates_workspace_configuration(self):
         launcher = (REPO_ROOT / "bin" / "start-mcp.mjs").read_text()
-        assert "tmpdir()" in launcher
-        assert "MCP_RUNTIME_ROOT" in launcher
+        assert "configureRuntimeWorkspace" in launcher
+        assert "./workspace-config.mjs" in launcher
 
     def test_launcher_configures_resources_before_importing_server(self):
         launcher = (REPO_ROOT / "bin" / "start-mcp.mjs").read_text()
@@ -397,6 +427,52 @@ class TestMcpManifest:
         import_index = launcher.index("await import(")
 
         assert configure_index < import_index
+
+
+class TestWorkspaceConfig:
+    """Behavioral tests for the default runtime workspace creation contract.
+
+    claude-prompts >=5.0.0 refuses to start when MCP_WORKSPACE names a
+    directory that does not exist. start-mcp must create ONLY the default
+    (unset MCP_WORKSPACE) case; a user-set path must reach the engine
+    untouched so its own refusal still fires.
+    """
+
+    def test_unset_workspace_creates_default_directory(self, tmp_path):
+        tmp_directory = tmp_path / "tmp-root"
+        tmp_directory.mkdir()
+        default_workspace = tmp_directory / "codex-prompts"
+        assert not default_workspace.exists()
+
+        result = configure_runtime_workspace({}, tmp_directory)
+
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["resolved"] == str(default_workspace)
+        assert default_workspace.is_dir()
+
+    def test_explicit_missing_workspace_is_not_created(self, tmp_path):
+        missing_workspace = tmp_path / "missing"
+        assert not missing_workspace.exists()
+
+        result = configure_runtime_workspace({"MCP_WORKSPACE": str(missing_workspace)}, tmp_path)
+
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["resolved"] == str(missing_workspace)
+        assert not missing_workspace.exists()
+
+    def test_runtime_root_is_set_but_not_precreated(self, tmp_path):
+        tmp_directory = tmp_path / "tmp-root"
+        tmp_directory.mkdir()
+
+        result = configure_runtime_workspace({}, tmp_directory)
+
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        runtime_root = payload["env"]["MCP_RUNTIME_ROOT"]
+        assert runtime_root == str(tmp_directory / "codex-prompts" / "server")
+        assert not Path(runtime_root).exists()
 
 
 class TestResourceConfig:
