@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "codex-prompts": {
+      "command": "node",
+      "args": [
+        "./bin/start-mcp.mjs",
+        "--transport=stdio",
+        "--client=codex"
+      ],
+      "cwd": ".",
+      "default_tools_approval_mode": "approve"
+    }
+  }
+}
