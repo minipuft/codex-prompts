@@ -73,14 +73,18 @@ To opt this user into a persistent catalog from another checkout, create `~/.con
 }
 ```
 
+The launcher lists that folder in `paths.resources` of a `config.jsonc` it writes into its temporary profile (`/tmp/codex-prompts` on Linux) at every start, so the folder is served in place of the bundled catalog. Prompts you create or edit through `resource_manager` land in `/tmp/codex-prompts/resources/`, not in that folder. Remove `resourcesPath` and the launcher removes the file it wrote.
+
+To use a profile of your own instead, set `MCP_WORKSPACE` to a folder holding `resources/<type>/` (`prompts/`, `gates/`, `frameworks/`, `styles/`) and, optionally, a `config.jsonc` whose `paths.resources` lists further folders, with `"bundled"` naming the shipped catalog. The launcher then writes nothing into that folder and reads neither codex-prompts config file; runtime state goes to its `server/` subfolder.
+
 Resource selection precedence is:
 
-1. `MCP_RESOURCES_PATH`
+1. A profile named by `MCP_WORKSPACE`
 2. The file named by `CODEX_PROMPTS_CONFIG_PATH`
 3. The default user config above
 4. The 26-prompt catalog bundled with the plugin
 
-Configured paths must be absolute existing directories. Invalid explicit configuration fails startup with a path-specific error instead of silently changing the visible prompt inventory. This setting is user-global across Codex projects; Codex 0.146 does not expose reliable invoking-project context to plugin MCP children.
+`MCP_RESOURCES_PATH` is no longer read: while it is set, the launcher stops with one line naming the replacement. Configured paths must be absolute existing directories. Invalid explicit configuration fails startup with a path-specific error instead of silently changing the visible prompt inventory. This setting is user-global across Codex projects; Codex 0.146 does not expose reliable invoking-project context to plugin MCP children.
 
 ## Trust the hooks (required once)
 
@@ -106,7 +110,7 @@ Tool names above are Codex-verified: Codex emits Claude Code-compatible `tool_na
 - **`subagent-gate-enforce` is not ported.** Codex fires `SubagentStop` with the full Claude-compatible envelope (`agent_transcript_path`, `agent_type`, `stop_hook_active`), but the delegated task prompt is encrypted in `tool_input.message` and the transcript's inter-agent `NEW_TASK` payload block is empty — the `### Quality Gates` criteria the upstream hook parses are not recoverable in plaintext anywhere. Until Codex persists inter-agent payloads (or a session-state-based redesign is validated), delegated-step gate enforcement relies on the main-session `gate-enforce` + `ralph-stop` loop.
 - **Plugin variables are not interpolated.** Codex 0.146 passed `${CLAUDE_PLUGIN_ROOT}` literally. The plugin therefore launches a relative `./bin/start-mcp.mjs` with `cwd: "."`, which Codex resolves to the installed plugin root.
 - **MCP sandbox reach varies by release.** On 0.146 a child could write `/tmp` but not `~/.codex` or the plugin cache; re-probed on 0.147 it wrote all of them. Do not rely on either result — the launcher keeps runtime state in the OS-temp directory regardless, because the binding constraint is addressability rather than permission: `PLUGIN_DATA` is set for hook children and unset for the MCP child. The launcher sets `MCP_RUNTIME_ROOT` to the OS-temp runtime directory, while prompt resources are selected independently through the persistent user configuration described above.
-- **Project context is unavailable to the MCP child.** Codex strips the invoking project path from this launch shape, so automatic per-project catalogs are not supported on 0.146. Use the explicit user config or `MCP_RESOURCES_PATH`.
+- **Project context is unavailable to the MCP child.** Codex strips the invoking project path from this launch shape, so automatic per-project catalogs are not supported on 0.146. Use the explicit user config or a profile named by `MCP_WORKSPACE`.
 
 ## Development notes
 
