@@ -97,18 +97,19 @@ try {
     )
 
 
-def resolve_resources_path(env: dict, home: Path, bundled_resources: Path):
-    """Execute the Node resolver with explicit inputs and capture its contract."""
+def configure_resources(env: dict, home: Path, workspace: Path, is_default: bool = True):
+    """Execute the Node resource selection with explicit inputs and capture its contract."""
     script = """
-import { resolveResourcesPath } from './bin/resource-config.mjs';
+import { configureResourcesEnvironment } from './bin/resource-config.mjs';
 
+const env = JSON.parse(process.argv[1]);
 try {
-  const resolved = resolveResourcesPath({
-    env: JSON.parse(process.argv[1]),
+  const selection = configureResourcesEnvironment({
+    env,
     homeDirectory: process.argv[2],
-    bundledResourcesPath: process.argv[3],
+    runtimeWorkspace: { path: process.argv[3], isDefault: process.argv[4] === 'default' },
   });
-  process.stdout.write(resolved);
+  process.stdout.write(JSON.stringify({ selection, env }));
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(2);
@@ -122,13 +123,19 @@ try {
             script,
             json.dumps(env),
             str(home),
-            str(bundled_resources),
+            str(workspace),
+            "default" if is_default else "user",
         ],
         capture_output=True,
         text=True,
         cwd=REPO_ROOT,
         timeout=30,
     )
+
+
+def parse_jsonc(text: str):
+    """Read a config the launcher wrote: whole-line // comments, otherwise strict JSON."""
+    return json.loads("\n".join(line for line in text.splitlines() if not line.startswith("//")))
 
 
 class TestPromptSuggest:
@@ -429,6 +436,30 @@ class TestMcpManifest:
         assert configure_index < import_index
 
 
+    def test_launcher_reports_removed_resources_variable_in_one_line(self, tmp_path):
+        env = {
+            **os.environ,
+            "MCP_RESOURCES_PATH": str(tmp_path),
+            "MCP_WORKSPACE": str(tmp_path),
+        }
+
+        result = subprocess.run(
+            ["node", str(REPO_ROOT / "bin" / "start-mcp.mjs")],
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+            env=env,
+            timeout=30,
+        )
+
+        assert result.returncode == 1
+        assert result.stdout == ""
+        lines = result.stderr.strip().splitlines()
+        assert len(lines) == 1, result.stderr
+        assert lines[0].startswith("codex-prompts: MCP_RESOURCES_PATH is no longer read")
+        assert "MCP_WORKSPACE" in lines[0]
+
+
 class TestWorkspaceConfig:
     """Behavioral tests for the default runtime workspace creation contract.
 
@@ -476,50 +507,99 @@ class TestWorkspaceConfig:
 
 
 class TestResourceConfig:
-    """Behavioral tests for persistent resource selection precedence."""
+    """Behavioral tests for resource selection through the launcher's profile.
+
+    claude-prompts >=6 serves resources from the profile MCP_WORKSPACE names and from
+    paths.resources in that profile's config.jsonc; MCP_RESOURCES_PATH refuses startup.
+    """
 
     def test_missing_user_config_uses_bundled_resources(self, tmp_path):
-        bundled = tmp_path / "bundled"
-        bundled.mkdir()
+        profile = tmp_path / "profile"
+        profile.mkdir()
 
-        result = resolve_resources_path({}, tmp_path / "home", bundled)
+        result = configure_resources({}, tmp_path / "home", profile)
 
         assert result.returncode == 0, result.stderr
-        assert result.stdout == str(bundled)
+        payload = json.loads(result.stdout)
+        assert payload["selection"]["source"] == "bundled"
+        assert "MCP_RESOURCES_PATH" not in payload["env"]
+        assert not (profile / "config.jsonc").exists()
 
-    def test_default_user_config_selects_persistent_resources(self, tmp_path):
+    def test_default_user_config_lists_resources_in_launcher_profile(self, tmp_path):
         resources = tmp_path / "source-resources"
         resources.mkdir()
+        profile = tmp_path / "profile"
+        profile.mkdir()
         config = tmp_path / "home" / ".config" / "codex-prompts" / "config.json"
         config.parent.mkdir(parents=True)
         config.write_text(json.dumps({"resourcesPath": str(resources)}))
 
-        result = resolve_resources_path({}, tmp_path / "home", tmp_path / "bundled")
+        result = configure_resources({}, tmp_path / "home", profile)
 
         assert result.returncode == 0, result.stderr
-        assert result.stdout == str(resources)
+        payload = json.loads(result.stdout)
+        assert payload["selection"]["source"] == "configured"
+        assert payload["selection"]["resourcesPath"] == str(resources)
+        assert "MCP_RESOURCES_PATH" not in payload["env"]
+        written = parse_jsonc((profile / "config.jsonc").read_text())
+        assert written == {"version": 5, "paths": {"resources": [str(resources)]}}
 
-    def test_explicit_mcp_resources_path_wins_over_user_config(self, tmp_path):
-        explicit = tmp_path / "explicit-resources"
+    def test_user_workspace_wins_over_user_config_and_is_not_written(self, tmp_path):
         configured = tmp_path / "configured-resources"
-        explicit.mkdir()
         configured.mkdir()
+        user_profile = tmp_path / "user-profile"
+        user_profile.mkdir()
         config = tmp_path / "config.json"
         config.write_text(json.dumps({"resourcesPath": str(configured)}))
-        env = {
-            "MCP_RESOURCES_PATH": str(explicit),
-            "CODEX_PROMPTS_CONFIG_PATH": str(config),
-        }
+        env = {"CODEX_PROMPTS_CONFIG_PATH": str(config)}
 
-        result = resolve_resources_path(env, tmp_path / "home", tmp_path / "bundled")
+        result = configure_resources(env, tmp_path / "home", user_profile, is_default=False)
 
         assert result.returncode == 0, result.stderr
-        assert result.stdout == str(explicit)
+        payload = json.loads(result.stdout)
+        assert payload["selection"] == {"source": "workspace", "profile": str(user_profile)}
+        assert list(user_profile.iterdir()) == []
+
+    def test_removed_resources_variable_is_refused_with_the_replacement(self, tmp_path):
+        profile = tmp_path / "profile"
+        profile.mkdir()
+        env = {"MCP_RESOURCES_PATH": str(tmp_path)}
+
+        result = configure_resources(env, tmp_path / "home", profile)
+
+        assert result.returncode == 2
+        assert "MCP_RESOURCES_PATH is no longer read" in result.stderr
+        assert "MCP_WORKSPACE" in result.stderr
+        assert "resourcesPath" in result.stderr
+        assert not (profile / "config.jsonc").exists()
+
+    def test_dropping_resources_path_removes_only_the_launcher_written_config(self, tmp_path):
+        resources = tmp_path / "source-resources"
+        resources.mkdir()
+        profile = tmp_path / "profile"
+        profile.mkdir()
+        config = tmp_path / "config.json"
+        config.write_text(json.dumps({"resourcesPath": str(resources)}))
+        env = {"CODEX_PROMPTS_CONFIG_PATH": str(config)}
+        assert configure_resources(env, tmp_path / "home", profile).returncode == 0
+        assert (profile / "config.jsonc").exists()
+
+        config.write_text(json.dumps({}))
+        result = configure_resources(env, tmp_path / "home", profile)
+
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["selection"]["source"] == "bundled"
+        assert not (profile / "config.jsonc").exists()
+
+        hand_written = '{"version": 5}\n'
+        (profile / "config.jsonc").write_text(hand_written)
+        assert configure_resources(env, tmp_path / "home", profile).returncode == 0
+        assert (profile / "config.jsonc").read_text() == hand_written
 
     def test_explicit_config_path_must_exist(self, tmp_path):
         env = {"CODEX_PROMPTS_CONFIG_PATH": str(tmp_path / "missing.json")}
 
-        result = resolve_resources_path(env, tmp_path / "home", tmp_path / "bundled")
+        result = configure_resources(env, tmp_path / "home", tmp_path)
 
         assert result.returncode == 2
         assert "does not exist" in result.stderr
@@ -529,7 +609,7 @@ class TestResourceConfig:
         config.write_text("{not-json")
         env = {"CODEX_PROMPTS_CONFIG_PATH": str(config)}
 
-        result = resolve_resources_path(env, tmp_path / "home", tmp_path / "bundled")
+        result = configure_resources(env, tmp_path / "home", tmp_path)
 
         assert result.returncode == 2
         assert "valid JSON" in result.stderr
@@ -542,7 +622,7 @@ class TestResourceConfig:
         config.write_text(json.dumps({"resourcesPath": configured_path}))
         env = {"CODEX_PROMPTS_CONFIG_PATH": str(config)}
 
-        result = resolve_resources_path(env, tmp_path / "home", tmp_path / "bundled")
+        result = configure_resources(env, tmp_path / "home", tmp_path)
 
         assert result.returncode == 2
         assert "resourcesPath" in result.stderr
